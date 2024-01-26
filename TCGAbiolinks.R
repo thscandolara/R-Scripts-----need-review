@@ -5,8 +5,22 @@ getwd()
 setwd()
 
 #Call libraries
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("TCGAbiolinks")
 library(TCGAbiolinks)
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("SummarizedExperiment")
 library(SummarizedExperiment)
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("sesame")
 library(sesame)
 
 
