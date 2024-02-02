@@ -182,6 +182,21 @@ for (subdir in subdirectories) {
 }
 
 
+#Checar quantos arquivos eu tenho de cada .idat
+GrnPath <- unlist(sapply(paste(pd1$Sentrix_ID,pd1$Sentrix_Position,"Grn.idat",sep="_"), 
+                         function(x) grep(x,list.files( "/data04/projects04/SheilaCoelho/headspace_methyl/data/idats_tcga_larynx_tumors",
+                                                        recursive=T,full.names=TRUE), value = TRUE)))
+GrnPath
+
+
+RedPath <-unlist(sapply(paste(pd1$Sentrix_ID,pd1$Sentrix_Position,"Red.idat",sep="_"), 
+                        function(x) grep(x,list.files( "/data04/projects04/SheilaCoelho/headspace_methyl/data/idats_tcga_larynx_tumors",
+                                                       recursive=T,full.names=TRUE), value = TRUE)))
+RedPath
+
+
+
+
 #Sample sheet que baixei do site do GDC (dei upload no R)
 sample_sheet <- read.table("gdc_sample_sheet.2024-02-01.tsv",
                            sep = "\t",
