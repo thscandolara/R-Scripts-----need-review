@@ -1,0 +1,221 @@
+#Código Sarah Leyenne
+#Call packages
+library(ChAMP)
+library(ggplot2)
+library(dplyr)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(ggpubr)
+library(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
+
+setwd("~/main_folder/data/UFC/Sarah_Leyenne")
+load("~/main_folder/data/UFC/GSE152710_rawfiles/GSE152710/raw_files_ChAMP_pipeline_GSE152710.RData")
+
+# Filtrar as amostras de interesse (DX e controle)
+keepsamples <- myLoad$pd$time_after_diagnosis == "DX" | myLoad$pd$Sample_Group == "control"
+
+
+# Filtrar a matriz de metilação e os dados fenotípicos
+myCombat_dx <- myCombat[, keepsamples]#83
+pd_dx <- myLoad$pd[keepsamples, ]#83
+
+rm(keepsamples, myCombat, myNorm)
+
+
+# Rodar a análise para identificação das DMPs
+myDMP_dx <- champ.DMP(beta = myCombat_dx,
+                      pheno=pd_dx$Sample_Group,
+                      adjPVal = 0.001,
+                      arraytype = "450K",
+                      adjust.method = "BH")
+
+DMPs_hrMDS <- myDMP_dx$hrMDS_to_control
+DMPs_sAML <- myDMP_dx$control_to_sAML
+
+
+#Rodar analise para identificação de DMR
+myCombat_dx <- as.matrix(myCombat_dx)#input precisa ser uma matriz
+
+myDMR_dx <- champ.DMR(beta = myCombat_dx,
+                      pheno = pd_dx$Sample_Group,
+                      compare.group = c("hrMDS", "control"),
+                      arraytype = "450K",
+                      method = "DMRcate")
+
+#Transformar em dataframe para poder filtrar as linhas
+myCombat_dx <- as.data.frame(myCombat_dx)
+
+# Filtrar as sondas associadas ao gene H19
+# Seleciona apenas as probes que atendem uma das duas condições
+hdac4_probes <- rownames(probe.features[probe.features$gene == "HDAC4", ])
+#425 probes
+
+hdac4_probes
+KCNQ1OT1_probes <- rownames(probe.features[probe.features$gene == "KCNQ1OT1" &
+                                             probe.features$feature %in% c("TSS1500", "TSS200", "1stExon"), ])
+#40
+
+PHLDA1_probes <- rownames(probe.features[probe.features$gene == "PHLDA1" &
+                                           probe.features$feature %in% c("TSS1500", "TSS200", "1stExon"), ])
+
+#7
+
+
+
+# Extrair os valores de metilação dessas sondas
+CDKN1C_methylation <- myCombat_dx[CDKN1C_probes, ]
+KCNQ1OT1_methylation <- myCombat_dx[KCNQ1OT1_probes, ]
+PHLDA1_methylation <- myCombat_dx[PHLDA1_probes, ]
+INSIGF2_methyl <- myCombat_dx[INSIGF2_probes, ]
+HDAC4_methyl <- myCombat_dx[hdac4_probes, ]
+
+
+# Calcular a mediana de metilação por amostra
+CDKN1C_medians <- apply(CDKN1C_methylation, 2, median, na.rm = TRUE)
+KCNQ1OT1_medians <- apply(KCNQ1OT1_methylation, 2, median, na.rm = TRUE)
+PHLDA1_medians <- apply(PHLDA1_methylation, 2, median, na.rm = TRUE)
+INSIGF2_medians <- apply(INSIGF2_methyl, 2, median, na.rm = TRUE)
+HDAC4_medians <- apply(HDAC4_methyl, 2, median, na.rm = TRUE)
+
+# Criar um dataframe combinando a mediana de metilação com os dados fenotípicos
+CDKN1C_methyl_dx <- data.frame(Sample_Name = colnames(CDKN1C_methylation),
+                                 Median_Methylation = CDKN1C_medians)
+
+
+KCNQ1OT1_methyl_dx <- data.frame(Sample_Name = colnames(KCNQ1OT1_methylation),
+                               Median_Methylation = KCNQ1OT1_medians)
+
+PHLDA1_methyl_dx <- data.frame(Sample_Name = colnames(PHLDA1_methylation),
+                               Median_Methylation = PHLDA1_medians)
+
+INSIGF2_methyl_dx <- data.frame(Sample_Name = colnames(INSIGF2_methyl),
+                               Median_Methylation = INSIGF2_medians)
+
+HDAC4_methyl_dx <- data.frame(Sample_Name = colnames(HDAC4_methyl),
+                                Median_Methylation = HDAC4_medians)
+
+
+# Mesclar com os dados fenotípicos (ajuste o nome da coluna de ID de amostras, se necessário)
+methylation_data <- merge(HDAC4_methyl_dx, pd_dx, by = "Sample_Name")
+
+#Plotar apenas as amostras ao DX.
+
+# Aplicar o teste de Kruskal-Wallis
+kruskal_test <- kruskal.test(Median_Methylation ~ Sample_Group, data = methylation_data)
+print(kruskal_test)
+#p-value = 0.8984 CDKN1C
+#p-value = 0.1057 KCNQ1OT1
+#p-value = 0.9024 PHLDA1
+#p-value = 0.5255 INS-IGF2
+#p-value = 0.005785 HDAC4
+
+
+ggplot(methylation_data, aes(x = Sample_Group, y = Median_Methylation, fill = Sample_Group)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, size = 1, alpha = 0.6) +  # Adicionar pontos individuais para cada amostra
+  labs(title = "Methylation levels of HDAC4 gene",
+       x = "Sample Group - at DX", y = "Median Methylation") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3") +
+  stat_compare_means(method = "kruskal.test", label = "p.format") # Adicionar o valor p do teste Kruskal-Wallis
+
+
+
+
+
+
+#Plotar heatmap dos níveis de metilação de acordo com uma lista de genes.
+
+# Lista de 26 genes associados a mecanismos epigenéticos
+epigenetic_genes <- c("DNMT1", "DNMT3A", "DNMT3B", "TET1", "TET2", "TET3",
+                      "EZH2", "KMT2A", "KDM6A", "HDAC1", "HDAC2", "HDAC3",
+                      "KDM5A", "SMARCA4", "CHD1", "BRG1",
+                      "BMI1", "RNF2", "DICER1", "AGO2", "MECP2", "CBX7",
+                      "SIRT1", "G9a", "SETDB1", "SUV39H1")
+
+# Lista de 10 genes do IPSS molecular para SMD
+ipss_genes <- c("TP53", "SF3B1", "SRSF2", "U2AF1", "RUNX1", 
+                "DNMT3A", "ASXL1", "EZH2", "IDH1", "IDH2")
+
+# Combinar ambas as listas
+all_genes <- unique(c(epigenetic_genes, ipss_genes))
+
+# Filtragem de probes para os genes combinados
+filtered_probes <- rownames(probe.features[probe.features$gene %in% all_genes, ])
+#614 sondas.
+
+
+# Extrair nomes de probes consideradas DMPs entre MDS vs controles e controles vs sAML
+probes_dmp_hrmds <- rownames(DMPs_hrMDS) #14249
+probes_dmp_saml <- rownames(DMPs_sAML) #11255
+
+# Unir todas as DMPs em um único vetor
+all_dmps <- unique(c(probes_dmp_hrmds, probes_dmp_saml)) #18439 dmps
+
+# Encontrar probes em comum entre as duas listas
+common_probes <- intersect(filtered_probes, all_dmps) #apenas 21
+
+# Filtrar a matriz beta 'myCombat' para manter apenas as common_probes
+matrizbeta_filtered <- myCombat_dx[rownames(myCombat_dx) %in% common_probes, ]
+
+# Filtrar probe.features para manter apenas as sondas que estão em matrizbeta_filtered
+probe.features_f <- probe.features[rownames(probe.features) %in% rownames(matrizbeta_filtered), ]
+
+
+# Anotação para o momento da coleta: DX ou controle
+time_annotation <- pd_dx$time_after_diagnosis  # Coluna com o momento da coleta (DX ou controle)
+time_annotation <- factor(time_annotation, levels = c("control", "DX"))
+
+# Anotação para o tipo de amostra: controle, hrMDS ou sAML
+group_annotation <- pd_dx$Sample_Group  # Coluna com o tipo de amostra (control, hrMDS, sAML)
+group_annotation <- factor(group_annotation, levels = c("control", "hrMDS", "sAML"))
+
+
+# Pro heatmap:
+annotation_time_point <- HeatmapAnnotation(
+  Time_at_diagnosis = time_annotation,
+  col = list(Time_at_diagnosis = c("control" ="pink", "DX" = "#2E8B57"))
+)
+
+# Anotação de tipo de amostra (controle, hrMDS ou sAML)
+annotation_sample_group <- HeatmapAnnotation(
+  Group = group_annotation,
+  col = list(Group = c("control" = "honeydew4", "hrMDS" = "lightskyblue2", "sAML" = "indianred"))
+)
+
+# 4. Escolher a paleta de cores para o heatmap
+color_palette <- colorRampPalette(brewer.pal(n = 11, name = "RdYlBu"))(100)
+
+# 5. Gerar o heatmap com ambas as anotações
+Heatmap(matrizbeta_filtered,
+        name = "DMPs between hrMDS and sAML vs controls",
+        top_annotation = c(annotation_time_point, annotation_sample_group),  # Adicionar as duas anotações
+        cluster_rows = TRUE, 
+        cluster_columns = TRUE,
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        col = color_palette,  # Paleta de cores para os valores beta
+        heatmap_legend_param = list(title = "Methylation Level", 
+                                    at = seq(0, 1, length.out = 11), 
+                                    labels = round(seq(0, 1, length.out = 11), 2))
+)
+
+
+# 1. Calcular a mediana da metilação para cada gene
+# Assumindo que probe.features contém uma coluna chamada "gene" com os nomes dos genes
+# E que matrizbeta_filtered já tem os nomes das sondas como rownames
+
+# Criar um dataframe a partir de matrizbeta_filtered
+matrizbeta_df <- as.data.frame(matrizbeta_filtered)
+matrizbeta_df$probe_id <- rownames(matrizbeta_df)  # Adicionar IDs das sondas como coluna
+probe.features$probe_id <- rownames(probe.features)
+
+# Juntar com probe.features para obter os genes
+merged_df <- merge(matrizbeta_df, probe.features, by = "probe_id")
+
+# Calcular a mediana dos níveis de metilação por gene
+gene_methylation <- aggregate(. ~ gene, data = merged_df, FUN = median)
+
+# Se você tiver uma coluna com o ID das sondas, use-a em vez de todas as colunas
+# Isso garante que você não inclua colunas desnecessárias
+gene_methylation <- aggregate(matrizbeta_df[, -ncol(matrizbeta_df)] ~ gene, data = merged_df, FUN = median)
