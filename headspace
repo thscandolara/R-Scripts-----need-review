@@ -1,0 +1,409 @@
+################################################################################
+# PIPELINE DE ANÁLISE DE METILAÇÃO - ARRAY EPICv1
+# Projeto: HeadSpace - Câncer de Laringe
+# Autora: Thalita Scandolara
+# Data: Agosto 2025 / atualizado Fevereiro 2026
+# Descrição: QC, normalização, correção de batch, DMPs/DMRs, enriquecimento,
+#            clustering de metilação e análise de sobrevida.
+################################################################################
+# ==============================================================================
+# 1. PACOTES
+# ==============================================================================
+# Carregar todos os pacotes no início para facilitar auditoria de dependências
+
+library(ChAMP)
+library(minfi)
+library(limma)
+library(DMRcate)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(GenomicRanges)
+
+library(ConsensusClusterPlus)
+library(EpiDISH)
+library(missMethyl)
+library(pamr)
+library(glmnet)
+library(pROC)
+
+library(survival)
+library(survminer)
+
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(ReactomePA)
+library(enrichplot)
+
+library(tidyverse)
+library(factoextra)
+library(RColorBrewer)
+library(viridis)
+
+
+# ==============================================================================
+# 2. PARÂMETROS GLOBAIS CONFIGURÁVEIS
+# ==============================================================================
+
+# --- Diretórios ---
+DIR_DATA    <- "/data04/projects04/SheilaCoelho/headspace_methyl/data/DADOS_GERADOS_AGOSTO2025_em_uso"
+DIR_RESULTS <- file.path(DIR_DATA, "LN_Results")
+
+# Criar pasta de resultados se não existir
+if (!dir.exists(LN_Results)) dir.create(LN_Results, recursive = TRUE)
+
+# --- Semente para reprodutibilidade ---
+SEED <- 123
+
+# --- Parâmetros de filtragem (champ.load) ---
+PARAM_detPcut      <- 0.01
+PARAM_ProbeCutoff  <- 0.0
+PARAM_SampleCutoff <- 0.1
+PARAM_beadCutoff   <- 0.05
+
+# --- Parâmetros de análise diferencial ---
+PARAM_adjPVal_TvsN    <- 0.001   # DMP Tumor vs Normal
+PARAM_adjPVal_nodal   <- 0.05    # DMP status nodal
+PARAM_adjPVal_cigar   <- 0.1     # DMP tabagismo
+PARAM_deltaBeta_min   <- 0.3     # Filtro de deltaBeta
+
+# --- Parâmetros de clustering ---
+PARAM_maxK            <- 6       # K máximo no ConsensusCluster
+PARAM_reps            <- 1000    # Reamostragens
+PARAM_k_opt           <- 4       # K escolhido após avaliação visual dos PDFs
+
+# --- Parâmetros de enriquecimento ---
+PARAM_pval_enrich     <- 0.05
+PARAM_qval_enrich     <- 0.05
+
+setwd(DIR_DATA)
+
+
+
+# ==============================================================================
+# 3. CARREGAMENTO DOS DADOS BRUTOS (IDAT)
+# ==============================================================================
+
+myLoad <- champ.load(
+  directory    = getwd(),
+  method       = "ChAMP",
+  arraytype    = "EPIC",
+  methValue    = "B",
+  filterDetP   = TRUE,
+  ProbeCutoff  = PARAM_ProbeCutoff,
+  SampleCutoff = PARAM_SampleCutoff,
+  detPcut      = PARAM_detPcut,
+  filterBeads  = TRUE,
+  beadCutoff   = PARAM_beadCutoff,
+  filterNoCG   = TRUE,
+  filterSNPs   = TRUE,
+  filterMultiHit = TRUE,
+  filterXY     = TRUE,
+  force        = FALSE
+)
+# Resultado esperado: ~564.670 sondas, 281 amostras
+
+table(myLoad$pd$Sample_Type)
+
+CpG.GUI(CpG = rownames(myLoad$beta), arraytype = "EPIC")
+
+champ.QC(
+  beta       = myLoad$beta,
+  pheno      = myLoad$pd$Sample_Type,
+  resultsDir = "./CHAMP_QCimages_BeforeNormalization/"
+)
+
+
+# ==============================================================================
+# 4. NORMALIZAÇÃO (BMIQ)
+# ==============================================================================
+# BMIQ corrige o viés de design entre sondas Tipo I e Tipo II.
+
+myNorm <- champ.norm(
+  beta      = myLoad$beta,
+  method    = "BMIQ",
+  arraytype = "EPIC",
+  plotBMIQ  = TRUE,
+  cores     = 8
+)
+
+champ.QC(
+  beta       = myNorm,
+  pheno      = myLoad$pd$Sample_Type,
+  resultsDir = "./CHAMP_QCimages_AfterNormalization/"
+)
+
+mdsPlot(
+  myNorm,
+  numPositions = 1000,
+  sampNames    = myLoad$pd$Sample_Name,
+  sampGroups   = myLoad$pd$Sample_Type,
+  pch          = 21,
+  legendPos    = "bottomleft",
+  legendNCol   = 1
+)
+
+save(myLoad, myNorm, file = "myLoadmyNormLarynx_aug2025.RData")
+
+
+
+# ==============================================================================
+# 5. SVD E CORREÇÃO DE BATCH (ComBat)
+# ==============================================================================
+
+# champ.SVD exige data.frame
+myNorm_df <- as.data.frame(myNorm)
+
+myLoad$pd$Slide <- as.factor(myLoad$pd$Slide)
+
+champ.SVD(
+  beta    = myNorm_df,
+  pd      = myLoad$pd,
+  PDFplot = TRUE,
+  Rplot   = TRUE
+)
+
+myCombat <- champ.runCombat(
+  beta         = as.matrix(myNorm_df),
+  pd           = myLoad$pd,
+  variablename = "Sample_Type",
+  batchname    = c("Slide"),
+  logitTrans   = TRUE
+)
+
+champ.SVD(
+  beta       = as.data.frame(myCombat),
+  pd         = myLoad$pd,
+  PDFplot    = TRUE,
+  Rplot      = TRUE,
+  resultsDir = "./CHAMP_SVDimages_ComBat/"
+)
+
+myCombat <- as.matrix(myCombat)
+save(myCombat, file = "myCombat.RData")
+
+# Anotação filtrada para sondas remanescentes
+probe.features.myCombat <- probe.features[
+  rownames(probe.features) %in% rownames(myCombat), ]
+
+table(probe.features.myCombat$feature)
+
+
+# ==============================================================================
+# 6. ANÁLISE DIFERENCIAL: TUMOR vs NORMAL
+# ==============================================================================
+
+# --- 6.1 DMPs ---
+DMP_TvsN <- champ.DMP(
+  beta          = myCombat,
+  pheno         = myLoad$pd$Sample_Type,
+  adjPVal       = PARAM_adjPVal_TvsN,
+  arraytype     = "EPIC",
+  adjust.method = "BH"
+)
+# Esperado: ~141.457 sondas | TUMOR: 268 | NORMAL: 13
+
+DMPs_TvsN <- DMP_TvsN$TUMOR_to_NORMAL
+write.csv(DMPs_TvsN, file = file.path(DIR_RESULTS, "DMPs_Tumor_vs_Normal_Larynx.csv"))
+table(DMPs_TvsN$feature)
+
+DMP.GUI(DMP_TvsN[[1]], beta = myCombat, pheno = myLoad$pd$Sample_Type)
+
+
+# --- 6.2 Filtro por deltaBeta >= |0.3| ---
+# deltaBeta negativo = hipermetilado no tumor
+# deltaBeta positivo = hipometilado no tumor (mais metilado no normal)
+
+# [BUG CORRIGIDO] O original usava with() e indexação redundante.
+# Forma direta e legível:
+filteredDMPs <- DMPs_TvsN[abs(DMPs_TvsN$deltaBeta) >= PARAM_deltaBeta_min, ]
+# Esperado: ~4.986 sondas
+
+write.csv(filteredDMPs, file = file.path(DIR_RESULTS, "DMPs_TvsN_DeltaBetaFiltered_Larynx.csv"))
+table(filteredDMPs$feature)
+
+selected_probes <- rownames(filteredDMPs)
+myCombat_subset <- myCombat[selected_probes, ]
+dim(myCombat_subset)  # Esperado: 4986 x 281
+
+# [BUG CORRIGIDO] Variável se chamava "filtered_DMPs" (com underline) em alguns
+# trechos e "filteredDMPs" em outros. Padronizado para filteredDMPs em todo o script.
+genes_hyperM_tumor <- unique(filteredDMPs$gene[filteredDMPs$deltaBeta < 0])
+genes_hypoM_tumor  <- unique(filteredDMPs$gene[filteredDMPs$deltaBeta > 0])
+
+
+# --- 6.3 DMRs ---
+myDMR_TvsN <- champ.DMR(
+  beta      = myCombat,
+  pheno     = myLoad$pd$Sample_Type,
+  method    = "DMRcate",
+  arraytype = "EPIC"
+)
+# Esperado: ~10.958 DMRs
+
+# [BUG CORRIGIDO] O objeto era salvo como "myDMR_TvsN$DMRcateDMR" mas depois
+# referenciado como "DMRs_TvsN" (sem o prefixo). Padronizado:
+DMRs_TvsN <- myDMR_TvsN$DMRcateDMR
+write.csv(DMRs_TvsN, file = file.path(DIR_RESULTS, "DMRs_Tumor_vs_Normal.csv"))
+
+DMR.GUI(
+  myDMR_TvsN,
+  beta          = myCombat,
+  pheno         = myLoad$pd$Sample_Type,
+  runDMP        = TRUE,
+  compare.group = NULL,
+  arraytype     = "EPIC"
+)
+
+
+# ==============================================================================
+# 7. ENRIQUECIMENTO FUNCIONAL — TUMOR vs NORMAL
+# ==============================================================================
+
+# --- 7.1 Listas de genes ---
+genes_DMP_TvsN <- unique(filteredDMPs$gene)
+
+# [BUG CORRIGIDO] unique() direto em overlapping.genes ignora que cada célula
+# pode conter múltiplos genes separados por vírgula. Expansão correta:
+genes_DMR_TvsN <- unique(trimws(unlist(strsplit(DMRs_TvsN$overlapping.genes, ","))))
+genes_DMR_TvsN <- genes_DMR_TvsN[genes_DMR_TvsN != ""]
+
+# --- 7.2 Conversão para ENTREZ ID ---
+genes_DMP_entrez   <- bitr(genes_DMP_TvsN,    fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+genes_DMR_entrez   <- bitr(genes_DMR_TvsN,    fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+genes_hyper_entrez <- bitr(genes_hyperM_tumor, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+genes_hypo_entrez  <- bitr(genes_hypoM_tumor,  fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+
+# --- 7.3 Função auxiliar: evita repetição de código ---
+run_enrichment <- function(entrez_ids, label, results_dir,
+                           pval = PARAM_pval_enrich,
+                           qval = PARAM_qval_enrich) {
+  ego <- enrichGO(
+    gene = entrez_ids, OrgDb = org.Hs.eg.db,
+    keyType = "ENTREZID", ont = "BP",
+    pAdjustMethod = "BH",
+    pvalueCutoff = pval, qvalueCutoff = qval,
+    readable = TRUE
+  )
+  ekegg <- enrichKEGG(
+    gene = entrez_ids, organism = "hsa",
+    pAdjustMethod = "BH",
+    pvalueCutoff = pval, qvalueCutoff = qval
+  )
+  ereact <- enrichPathway(
+    gene = entrez_ids, organism = "human",
+    pAdjustMethod = "BH",
+    pvalueCutoff = pval, qvalueCutoff = qval,
+    readable = TRUE
+  )
+  ereact <- pairwise_termsim(ereact)
+
+  write.csv(as.data.frame(ego),    file.path(results_dir, paste0("GO_BP_",   label, ".csv")))
+  write.csv(as.data.frame(ekegg),  file.path(results_dir, paste0("KEGG_",    label, ".csv")))
+  write.csv(as.data.frame(ereact), file.path(results_dir, paste0("Reactome_",label, ".csv")))
+
+  print(barplot(ego,    showCategory = 20, title = paste("GO BP —",  label)))
+  print(dotplot(ekegg,  showCategory = 20, title = paste("KEGG —",   label)))
+  print(emapplot(ereact, showCategory = 20))
+
+  list(GO = ego, KEGG = ekegg, Reactome = ereact)
+}
+
+enrich_DMP_TvsN <- run_enrichment(genes_DMP_entrez$ENTREZID,   "DMPs_TvsN",   DIR_RESULTS)
+enrich_DMR_TvsN <- run_enrichment(genes_DMR_entrez$ENTREZID,   "DMRs_TvsN",   DIR_RESULTS)
+enrich_hyper    <- run_enrichment(genes_hyper_entrez$ENTREZID,  "Hyper_Tumor", DIR_RESULTS)
+enrich_hypo     <- run_enrichment(genes_hypo_entrez$ENTREZID,   "Hypo_Tumor",  DIR_RESULTS)
+
+# --- Comparação Hyper vs Hypo ---
+geneList <- list(
+  Hyper_Tumor = genes_hyper_entrez$ENTREZID,
+  Hypo_Tumor  = genes_hypo_entrez$ENTREZID
+)
+
+compare_res <- compareCluster(
+  geneCluster   = geneList,
+  fun           = "enrichGO",
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = PARAM_qval_enrich,
+  readable      = TRUE
+)
+
+dotplot(compare_res, showCategory = 10,
+        title = "Enriquecimento comparado: Hyper vs Hypo no Tumor")
+
+
+# ==============================================================================
+# 8. FILTRAGEM: SOMENTE AMOSTRAS TUMORAIS
+# ==============================================================================
+
+tumor_idx      <- myLoad$pd$Sample_Type == "TUMOR"
+myCombat_tumor <- myCombat[, tumor_idx]
+pd_tumor       <- myLoad$pd[tumor_idx, ]
+
+table(pd_tumor$diag_stage_group)
+table(pd_tumor$nodal_status)
+table(pd_tumor$cig_status)
+
+
+# ==============================================================================
+# 9. SUBGRUPO: ESTADIAMENTO (Early vs Late)
+# ==============================================================================
+
+keep_stage     <- pd_tumor$diag_stage_group %in% c("Early", "Late")
+pd_stage       <- pd_tumor[keep_stage, ]
+myCombat_stage <- myCombat_tumor[, keep_stage]
+table(pd_stage$diag_stage_group)  # Early: 114 | Late: 145
+
+# DMP estadiamento — sem sinal significativo mesmo com adjPVal = 1
+DMP_Stage <- champ.DMP(
+  beta          = myCombat_stage,
+  pheno         = pd_stage$diag_stage_group,
+  adjPVal       = 1,
+  arraytype     = "EPIC",
+  adjust.method = "BH"
+)
+
+# --- PCA: estadiamento ---
+set.seed(SEED)
+pca_stage <- prcomp(t(myCombat_stage), scale. = TRUE)
+
+# [BUG CORRIGIDO] O original usava summary(pca) que não existe — o objeto
+# correto é pca_stage. Corrigido em todas as PCAs do script.
+var_exp_stage <- summary(pca_stage)$importance[2, ] * 100
+
+pca_stage_df <- data.frame(pca_stage$x, pd_stage)
+
+ggplot(pca_stage_df, aes(x = PC1, y = PC2, color = diag_stage_group)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(
+    title = "PCA — Estadiamento",
+    x     = paste0("PC1 (", round(var_exp_stage[1], 1), "%)"),
+    y     = paste0("PC2 (", round(var_exp_stage[2], 1), "%)")
+  )
+
+# [BUG CORRIGIDO] fviz_pca_ind() recebe o objeto prcomp, não o data.frame.
+# O original passava pca_stage_df (data.frame) — corrigido para pca_stage.
+fviz_pca_ind(
+  pca_stage,
+  geom.ind     = "point",
+  col.ind      = pd_stage$diag_stage_group,
+  palette      = "jco",
+  addEllipses  = TRUE,
+  legend.title = "Stage"
+)
+
+
+# ==============================================================================
+# 10. SUBGRUPO: STATUS LINFONODAL (N0 vs N+)
+# ==============================================================================
+
+pd_nodal <- pd_tumor %>%
+  filter(!is.na(nodal_status) & nodal_status != "NX") %>%
+  mutate(LN_group = ifelse(nodal_status == "N0", "N0", "others"))
+# 255 amostras | N0: 182 | others: 73
+
+
+
