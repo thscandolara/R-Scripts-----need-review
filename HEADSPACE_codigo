@@ -1,0 +1,1432 @@
+# Load packages
+library(ChAMP)
+library(RColorBrewer)
+library(tidyverse)
+library(viridis)
+
+
+setwd('/data04/projects04/SheilaCoelho/headspace_methyl/data/Larynx_Aug2025')
+# Load
+
+dir <- '/data04/projects04/SheilaCoelho/headspace_methyl/data/DADOS_GERADOS_AGOSTO2025_em_uso'
+setwd(dir)
+load("myLoadmyNormLarynx_aug2025.RData")
+load("myCombat.RData")
+
+
+### ANTES DE MAIS NADA, AJUSTAR A SAMPLESHEET.
+# #Load phenotype data 
+# pd_file <- read.csv("samplesheet_aug2025.csv", 
+#                     header = T, sep = ";")
+# 
+# table(pd_file$diag_stage_group)
+# #NA   Early  Late 
+# #9   125   163 
+# 
+# ## Exportar para ficar salvo em csv.
+# write.csv(pd_file, file = "samplesheetlarynx_august2025.csv", row.names = F)
+# 
+# rm(pd_file)
+# 
+# list.files(pattern = "idat$", recursive = TRUE)
+
+#---------------------------------------------------------------------------------------------------------------------
+
+#Para cada pasta (larynx, oc, opc): setwd
+
+#Criar arquivo my Load
+myLoad <- champ.load(directory= getwd(), 
+                     method = "ChAMP",
+                     arraytype = "EPIC",
+                     methValue = "B",
+                     filterDetP = T,
+                     ProbeCutoff = 0,
+                     SampleCutoff = 0.1,
+                     detPcut = 0.01,  
+                     filterBeads=T, 
+                     beadCutoff=0.05, 
+                     filterNoCG=T,
+                     filterSNPs=T,
+                     filterMultiHit=T, 
+                     filterXY = T,
+                     force = F)
+
+## All filterings are Done, now you have 564670 probes and 281 samples.
+
+
+## Checking the distribution and quality control of probes
+CpG.GUI (CpG= rownames(myLoad$beta), arraytype = 'EPIC')
+
+
+#QC plots will be proceed with 564670 probes and 281 samples
+champ.QC(beta = myLoad$beta, 
+         pheno = myLoad$pd$Sample_Type,
+         resultsDir="./CHAMP_QCimages_BeforeNormalization/")
+
+
+table(myLoad$pd$Sample_Type)
+#----------------------------------------------------------------------------------------------------------------
+
+#Normalização de sondas Type II
+
+myNorm <- champ.norm(beta=myLoad$beta,
+                     method = "BMIQ",
+                     arraytype = "EPIC",
+                     plotBMIQ=T,
+                     cores = 8)
+
+
+#Checagem de qualidade pós normalização
+champ.QC(beta = myNorm, 
+         pheno = myLoad$pd$Sample_Type,
+         resultsDir="./CHAMP_QCimages_AfterNormalization/")
+
+#
+mdsPlot(myNorm,
+        numPositions=1000,
+        sampNames=myLoad$pd$Sample_Name,
+        sampGroups=myLoad$pd$Sample_Type, 
+        pch = 21,
+        legendPos="bottomleft",
+        legendNCol=1)
+
+
+#Salvar arquivos
+save(myLoad, myNorm, file="myLoadmyNormLarynx_aug2025.RData")
+
+#----------------------------------------------------------------------------------------------------------------
+#Plot SVD
+
+#transformar em dataframe para ser input no SVD
+myNorm = as.data.frame(myNorm) 
+
+#Transformar 'slide' em factor
+myLoad$pd$Slide <- as.factor(myLoad$pd$Slide)
+
+champ.SVD(beta= myNorm,
+          pd=myLoad$pd,
+          PDFplot = T,
+          Rplot = T)
+
+#Transformar em matriz de novo
+myNorm <- as.matrix(myNorm)
+
+#----------------------------------------------------------------------------------------------------------------
+#Correção de batch effect
+
+#We want to correct for different batches - remove any biases regarding this
+myCombat <- champ.runCombat(beta = myNorm,
+                            pd = myLoad$pd,
+                            variablename = "Sample_Type",
+                            batchname = c("Slide"),
+                            logitTrans = T)
+
+
+
+#Transform into data.frame
+myCombat = as.data.frame(myCombat)
+
+#Perform SVD - checking if there is any difference
+champ.SVD(beta= myCombat,
+          PDFplot = T,
+          Rplot = T,
+          resultsDir="./CHAMP_SVDimages_ComBat/")
+
+myCombat = as.matrix(myCombat)
+save(myCombat, file = "myCombat.RData")
+
+
+# Filtrar probe.features mantendo apenas sondas presentes no myCombat
+probe.features.myCombat <- probe.features[rownames(probe.features) %in% rownames(myCombat), ]
+
+
+table(probe.features.myCombat$feature)
+
+
+#----------------------------------------------------------------------------------------------------------------
+
+
+###################################################################################################
+# DMPs tumor versus normal 
+
+DMP_TvsN <- champ.DMP(beta = myCombat,
+                      pheno=myLoad$pd$Sample_Type,
+                      adjPVal = 0.001,
+                      arraytype = "EPIC",
+                      adjust.method = "BH")
+#<TUMOR>:268 samples.
+#<NORMAL>:13 samples.
+#You have found 141457 significant MVPs with a BH adjusted P-value below 0.001.
+
+#dataframe
+DMPs_TvsN <- DMP_TvsN$TUMOR_to_NORMAL
+write.csv(DMPs_TvsN, file = "DMPs_between_Tumor_vs_Normal_Larynx.csv")
+
+table(DMPs_TvsN$feature)
+
+#
+DMP.GUI(DMP_TvsN[[1]], 
+        beta = myCombat, 
+        pheno = myLoad$pd$Sample_Type)
+
+
+head(DMPs_TvsN, 10)
+head(probe.features, 10)
+
+combat_df <- as.data.frame(myCombat)
+pd_file <- myLoad$pd
+
+write.csv(combat_df, file = "mycombat_df.csv")
+write.csv(pd_file, file = "pheno_data.csv")
+#######################################################################################################
+
+# !!! 
+#  We also want to identify probes that are at least >=|0.3| differently methylated. Thus:
+
+deltabeta = with(DMP_TvsN$TUMOR_to_NORMAL, which(abs(DMP_TvsN$TUMOR_to_NORMAL$deltaBeta) >= 0.3))
+filteredDMPs = DMP_TvsN$TUMOR_to_NORMAL[deltabeta,] 
+##This resulted in a total of 4986 probes.
+#Valor de deltabeta positivo = Mais metilado no NORMAL em relação ao TUMOR
+#Valor deltabeta negativo = mais metilado no TUMOR em relação ao NORMAL
+
+##Saving the DMP dataframe with deltaBeta values >=|0.3| as a .csv file!
+write.csv(filteredDMPs, file = "DMPs_TvsN_DeltaBetaFiltered_Larynx.csv") 
+
+
+# Obter os nomes das probes significativamente metiladas e com deltaBeta >= 0.3
+selected_probes <- rownames(filteredDMPs)
+
+# Criar um subconjunto do myCombat contendo apenas essas probes
+myCombat_subset <- myCombat[selected_probes, ]
+
+# Verificar dimensões do subconjunto para garantir que o filtro foi aplicado corretamente
+dim(myCombat_subset)
+#4986  281
+
+
+table(filteredDMPs$feature)
+
+##########################################################################################################
+
+#DMR  -- função que o André corrigiu com trace
+
+myDMR_DMRcate <- champ.DMR(beta=myCombat,
+                           pheno=myLoad$pd$Sample_Type,
+                           method="DMRcate",
+                           arraytype = "EPIC")
+
+#DMRcate detected 10958 DMRs with mafcut as= 0.05.
+
+search()
+sessionInfo()
+
+
+
+#Exportar planilha
+myDMR_TvsN <- myDMR_DMRcate$DMRcateDMR
+write.csv(myDMR_TvsN, file = "DMRs_tumor_versus_normal.csv")
+
+DMR.GUI(myDMR_DMRcate,
+        beta=myCombat,
+        pheno=myLoad$pd$Sample_Type,
+        runDMP=TRUE,
+        compare.group=NULL,
+        arraytype="EPIC")
+
+
+
+# Genes hipermetilados no tumor
+genes_hyperM_t <- unique(filtered_DMPs$gene[filtered_DMPs$deltaBeta < 0])
+
+# Genes hipometilados no tumor
+genes_hypoM_T <- unique(filtered_DMPs$gene[filtered_DMPs$deltaBeta > 0])
+
+# check
+head(genes_hyperM_t)
+head(genes_hypoM_T)
+
+
+
+##########################################################################################################
+
+# FILTRAR DF PARA MANTER APENAS AMOSTRAS TUMORAIS
+library(tidyverse)
+
+
+# apenas tumores
+tumor_samples <- myLoad$pd$Sample_Type == "TUMOR"
+
+# filtrar matriz beta 
+myCombat_tumor <- myCombat[, tumor_samples]
+
+# filtrar pd
+pd_tumor <- myLoad$pd[tumor_samples, ]
+
+table(pd_tumor$diag_stage_group)#9 amostras não categorizadas
+
+
+##filtrar novamente
+
+# apenas "Early" ou "Late"
+keep_stage <- pd_tumor$diag_stage_group %in% c("Early", "Late")
+
+# Filtrar pd de novo
+pd_stage <- pd_tumor[keep_stage, ]#259
+
+# Filtrar matriz beta de novo
+myCombat_stage <- myCombat_tumor[, keep_stage]
+
+# Coeck
+table(pd_stage$diag_stage_group)
+# Early  Late 
+# 114   145 
+
+
+#identificar DMPs
+DMP_Stage <- champ.DMP(beta = myCombat_stage,
+                      pheno=pd_stage$diag_stage_group,
+                      adjPVal = 1,
+                      arraytype = "EPIC",
+                      adjust.method = "BH")
+
+
+#### nao identificamos DMPs nem com 0.001,0.05, 0.1...
+#não consigo fazer analise de DMR
+
+#########################################################################################################
+
+#acometimento LN
+
+table(pd_tumor$nodal_status)
+sum(is.na(pd_tumor$nodal_status))
+
+
+#Filtrar pd para manter apenas quem tem info de LN
+pd_nodal <- pd_tumor %>%
+  filter(!is.na(nodal_status) & nodal_status != "NX")
+#fiquei com 255 amostras
+
+#criar nova coluna com categorizacao
+pd_nodal <- pd_nodal %>%
+  mutate(LN_group = ifelse(nodal_status == "N0", "N0", "others"))
+
+
+# Filtrar matriz beta de novo
+myCombat_nodal <- myCombat_tumor[, pd_nodal$Sample_Name]
+
+# Coeck
+table(pd_nodal$LN_group)
+# N0    others 
+# 182     73 
+
+
+#identificar DMPs
+DMP_Nodal <- champ.DMP(beta = myCombat_nodal,
+                       pheno=pd_nodal$LN_group,
+                       adjPVal = 0.01,
+                       arraytype = "EPIC",
+                       adjust.method = "BH")
+
+# 389 significant MVPs with a BH adjusted P-value below 0.01
+DMPs_nodalstatus <- DMP_Nodal$others_to_N0
+write.csv(DMPs_nodalstatus, file = "DMPs_Nodal_Status_pvalue_01.csv")
+
+
+
+#Filtro mais flexivel
+DMP_Nodal_0.05 <- champ.DMP(beta = myCombat_nodal,
+                       pheno=pd_nodal$LN_group,
+                       adjPVal = 0.05,
+                       arraytype = "EPIC",
+                       adjust.method = "BH")
+
+# 13876 significant MVPs with a BH adjusted P-value below 0.05
+
+
+#Exportar 
+DMPs_nodalstatus_flexible <- DMP_Nodal_0.05$others_to_N0
+write.csv(DMPs_nodalstatus_flexible, file = "DMPs_Nodal_Status_pvalue_05.csv")
+
+
+
+
+#Análise de DMR
+myDMR_nodal_DMRcate <- champ_DMR(beta=myCombat_nodal,
+                                pheno=pd_nodal$LN_group,
+                                method="DMRcate",
+                                arraytype = "EPICv1")
+
+
+
+#Exportar planilha
+myDMR_nodal <- myDMR_nodal_DMRcate$DMRcateDMR
+write.csv(myDMR_nodal, file = "DMRs_nodalstatus.csv")
+
+#############################################################################################
+
+
+# tabagismo
+
+
+table(pd_tumor$cig_status)
+# Current    Ever  Former   Never 
+# 44     119       6      79      20 
+
+sum(is.na(pd_tumor$cig_status)) #0
+
+sum(pd_tumor$cig_status == "")
+#44
+
+
+pd_cigar <- pd_tumor %>%
+  filter(cig_status != "") %>%  # remove linhas com string vazia
+  mutate(cig_group = ifelse(cig_status == "Never", "Never", "others")) 
+#224 observacoes
+
+
+# Filtrar matriz beta de novo
+myCombat_cigar <- myCombat_tumor[, pd_cigar$Sample_Name]
+
+# Coeck
+table(pd_cigar$cig_group)
+# Never others 
+# 20    204 
+
+
+#identificar DMPs
+DMP_cigar_flexible <- champ.DMP(beta = myCombat_cigar,
+                       pheno=pd_cigar$cig_group,
+                       adjPVal = 0.1,
+                       arraytype = "EPIC",
+                       adjust.method = "BH")
+
+#Exportar planilha
+myDMP_cigar_flexible <- DMP_cigar_flexible$others_to_Never
+write.csv(myDMP_cigar_flexible, file = "DMPs_cigar_status_flexible_pvalue01.csv")
+
+
+
+#Análise de DMR
+myDMR_cigar_DMRcate <- champ.DMR(beta=myCombat_cigar,
+                                 pheno=pd_cigar$cig_group,
+                                 method="DMRcate",
+                                 arraytype = "EPIC")
+#The FDR you specified in cpg.annotate() returned no significant CpGs, hence there are no DMRs.
+
+################################################################################################################################
+
+
+library(factoextra)
+#PCA estdiamento
+
+pca_stage <- prcomp(t(myCombat_stage), scale. = TRUE)
+# scale faz padronização estatística de cada variável (sonda) para ter média = 0 
+# e desvio padrão = 1 antes de calcular a decomposição.
+
+# pca df
+pca_stage_df <- data.frame(pca_stage$x, pd_stage)
+
+# Plot PCA 
+ggplot(pca_stage_df, aes(x = PC1, y = PC2, color = diag_stage_group)) +
+  geom_point(size = 1) +
+  theme_minimal() +
+  labs(title = "PCA - Stage",
+       x = paste0("PC1 (", round(summary(pca)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca)$importance[2,2]*100, 1), "%)"))
+
+
+# Plot diferente
+fviz_pca_ind(
+  pca_stage_df,
+  geom.ind = "point",
+  col.ind = pd_stage$diag_stage_group, # cor por grupo
+  palette = "jco",
+  addEllipses = TRUE, 
+  legend.title = "Stage Status"
+)
+
+
+
+
+#PCA acometimento linfonodal 
+
+pca_nodal <- prcomp(t(myCombat_nodal), scale. = TRUE)
+
+# pca df
+pca_nodal_df <- data.frame(pca_nodal$x, pd_nodal)
+
+# Plot PCA
+ggplot(pca_nodal_df, aes(x = PC1, y = PC2, color = LN_group)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "PCA - Nodal Status",
+       x = paste0("PC1 (", round(summary(pca)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca)$importance[2,2]*100, 1), "%)"))
+
+
+fviz_pca_ind(
+  pca_nodal,
+  geom.ind = "point",
+  col.ind = pd_nodal$LN_group, # cor por grupo
+  palette = "jco",
+  addEllipses = TRUE, 
+  legend.title = "Nodal Status"
+)
+
+
+
+
+#PCA tabagismo
+
+pca_cig2 <- prcomp(t(myCombat_cigar))
+
+# pca df
+pca_cig_df <- data.frame(pca_cig$x, pd_cigar)
+
+# Plot PCA
+ggplot(pca_cig_df, aes(x = PC1, y = PC2, color = cig_group)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "PCA - Tobacco Status",
+       x = paste0("PC1 (", round(summary(pca)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca)$importance[2,2]*100, 1), "%)"))
+
+
+fviz_pca_ind(
+  pca_cig2,
+  geom.ind = "point",
+  col.ind = pd_cigar$cig_group, # cor por grupo
+  palette = "jco",
+  addEllipses = TRUE, 
+  legend.title = "Tobacco Status"
+)
+
+
+
+#########################################################################################
+
+#Caracterizacao das sondas por regiao
+
+
+# Checar arquivos
+head(probe.features,2)
+head(DMPs_TvsN,2)
+head(myCombat,2)
+
+
+
+###########################################################
+
+#Enriquecimento
+
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(ReactomePA)
+library(dplyr)
+
+### 1. Obter lista de genes a partir das tabelas de DMP e DMR -----------------
+
+# Genes únicos associados às sondas (DMPs)
+genes_DMP_TvsN <- unique(filteredDMPs$gene)
+
+
+# Genes únicos associados às regiões (DMRs)
+genes_DMR_TvsN <- unique(DMRs_TvsN$overlapping.genes) #nao posso usar essa funçao pq tenho mais genes em algumas DMRs.
+head(DMRs_TvsN$overlapping.genes, 10)
+
+#O que fazer:
+# Quebrar os genes separados por vírgulas em cada linha
+genes_DMR_split <- strsplit(DMRs_TvsN$overlapping.genes, ",")
+
+# "strsplit" cria uma lista; vamos transformar em vetor
+genes_DMR_vector <- unlist(genes_DMR_split)
+
+# Remover espaços em branco antes/depois dos nomes
+genes_DMR_vector <- trimws(genes_DMR_vector)
+
+# Manter apenas nomes únicos
+genes_DMR_TvsN <- unique(genes_DMR_vector)
+
+# Ver os primeiros genes
+head(genes_DMR_TvsN, 20) #USAR ESSE PARA A ANALISE DE DMR
+
+
+
+
+
+### 2. Conversão de símbolos de genes para ENTREZ IDs -------------------------
+
+# clusterProfiler exige IDs padronizados, por exemplo ENTREZ
+# Usamos a função bitr para converter
+
+genes_DMP_entrez <- bitr(genes_DMP_TvsN,
+                         fromType = "SYMBOL",
+                         toType = "ENTREZID",
+                         OrgDb = org.Hs.eg.db)
+# 11.8% of input gene IDs are fail to map...
+
+
+genes_DMR_entrez <- bitr(genes_DMR_TvsN,
+                         fromType = "SYMBOL",
+                         toType = "ENTREZID",
+                         OrgDb = org.Hs.eg.db)
+#22.09% of input gene IDs are fail to map...
+
+# Agora tenho tabelas com colunas SYMBOL e ENTREZID
+# O input do enriquecimento é a coluna ENTREZID
+
+### 3. Enriquecimento funcional (GO, KEGG, Reactome) -------------------------
+
+## DMP genes
+ego_DMP <- enrichGO(gene          = genes_DMP_entrez$ENTREZID,
+                    OrgDb         = org.Hs.eg.db,
+                    keyType       = "ENTREZID",
+                    ont           = "BP",   # BP = Biological Process
+                    pAdjustMethod = "BH",
+                    pvalueCutoff  = 0.05,
+                    qvalueCutoff  = 0.05,
+                    readable      = TRUE)   # Converte ENTREZID de volta para símbolo
+
+ekegg_DMP <- enrichKEGG(gene          = genes_DMP_entrez$ENTREZID,
+                        organism      = "hsa",  # Homo sapiens
+                        pAdjustMethod = "BH",
+                        pvalueCutoff  = 0.05,
+                        qvalueCutoff  = 0.05)
+
+ereactome_DMP <- enrichPathway(gene = genes_DMP_entrez$ENTREZID,
+                               organism = "human",
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.05,
+                               qvalueCutoff = 0.05,
+                               readable = TRUE)
+
+
+# Calcular similaridade entre termos
+ereactome_DMP <- pairwise_termsim(ereactome_DMP)
+
+## Repetir para DMR genes
+ego_DMR <- enrichGO(gene          = genes_DMR_entrez$ENTREZID,
+                    OrgDb         = org.Hs.eg.db,
+                    keyType       = "ENTREZID",
+                    ont           = "BP",
+                    pAdjustMethod = "BH",
+                    pvalueCutoff  = 0.05,
+                    qvalueCutoff  = 0.05,
+                    readable      = TRUE)
+
+ekegg_DMR <- enrichKEGG(gene          = genes_DMR_entrez$ENTREZID,
+                        organism      = "hsa",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff  = 0.05,
+                        qvalueCutoff  = 0.05)
+
+
+ereactome_DMR <- enrichPathway(gene = genes_DMR_entrez$ENTREZID,
+                               organism = "human",
+                               pAdjustMethod = "BH",
+                               qvalueCutoff = 0.05,
+                               pvalueCutoff  = 0.05,
+                               readable = TRUE)
+
+library(enrichplot)
+# Calcular similaridade entre termos
+ereactome_DMR <- pairwise_termsim(ereactome_DMR)
+
+### 4. Visualização dos resultados ------------------------------------------
+
+# Visualizar tabelas resumidas
+head(ego_DMP)
+head(ekegg_DMP)
+head(ereactome_DMP)
+
+# Plots (GO/KEGG/Reactome)
+barplot(ego_DMP, showCategory = 20, title = "GO Enrichment - DMP Genes")
+dotplot(ekegg_DMP, showCategory = 20, title = "KEGG Pathways - DMP Genes")
+emapplot(ereactome_DMP, showCategory = 20)
+
+
+
+
+enrichmentReactome_DMPs_TvsN <- as.data.frame(ereactome_DMP)
+
+write.csv(enrichmentReactome_DMPs_TvsN, "Results/enrichmentReactome_DMPs_TvsN.csv")
+
+# Fazer o mesmo para DMR
+barplot(ego_DMR, showCategory = 20, title = "GO Enrichment - DMR Genes")
+dotplot(ekegg_DMR, showCategory = 20, title = "KEGG Pathways - DMR Genes")
+emapplot(ereactome_DMR, showCategory = 20)
+
+enrichmentReactome_DMRs_TvsN <- as.data.frame(ereactome_DMR)
+
+write.csv(enrichmentReactome_DMRs_TvsN, "Results/enrichmentReactome_DMRs_TvsN.csv")
+
+
+####################################################################################################
+
+# Genes hipermetilados no tumor
+genes_hyperM_t <- unique(filteredDMPs$gene[filteredDMPs$deltaBeta < 0])
+
+# Genes hipometilados no tumor
+genes_hypoM_T <- unique(filteredDMPs$gene[filteredDMPs$deltaBeta > 0])
+
+# check
+head(genes_hyperM_t)
+head(genes_hypoM_T)
+
+
+# Converter para ENTREZ ID
+genes_hyper_entrez <- bitr(genes_hyperM_t, fromType="SYMBOL", toType="ENTREZID", OrgDb=org.Hs.eg.db)
+genes_hypo_entrez  <- bitr(genes_hypoM_T,  fromType="SYMBOL", toType="ENTREZID", OrgDb=org.Hs.eg.db)
+
+
+
+# Enriquecimento GO (exemplo: processos biológicos)
+ego_hyperT <- enrichGO(gene          = genes_hyper_entrez$ENTREZID,
+                      OrgDb         = org.Hs.eg.db,
+                      keyType       = "ENTREZID",
+                      ont           = "BP",
+                      pAdjustMethod = "BH",
+                      qvalueCutoff  = 0.05,
+                      readable      = TRUE)
+
+ego_hypoT <- enrichGO(gene          = genes_hypo_entrez$ENTREZID,
+                     OrgDb         = org.Hs.eg.db,
+                     keyType       = "ENTREZID",
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     qvalueCutoff  = 0.05,
+                     readable      = TRUE)
+
+# Visualizar
+barplot(ego_hyperT, showCategory=20, title="DMPs Hipermetilados no Tumor")
+barplot(ego_hypoT,  showCategory=20, title="DMPs Hipometilados no Tumor")
+
+
+geneList <- list(
+  Hyper_Tumor = genes_hyper_entrez$ENTREZID,
+  Hypo_Tumor  = genes_hypo_entrez$ENTREZID
+)
+
+compare_res <- compareCluster(geneCluster   = geneList,
+                              fun           = "enrichGO",
+                              OrgDb         = org.Hs.eg.db,
+                              keyType       = "ENTREZID",
+                              ont           = "BP",
+                              pAdjustMethod = "BH",
+                              qvalueCutoff  = 0.05,
+                              readable      = TRUE)
+
+dotplot(compare_res, showCategory = 10, title="Comparação de enriquecimento: Hyper vs Hypo")
+
+############################################################################################################
+
+
+
+library("survminer")
+library("survival")
+
+#chamar a tabela DNAmAge. Fiz manualmente a importacao
+
+str(DNAmAgeCalcProject_19739_Results)
+DNAmAgeCalcProject_19739_Results <- as.data.frame(DNAmAgeCalcProject_19739_Results)
+colnames(DNAmAgeCalcProject_19739_Results)
+
+# Selecionando apenas as linhas com Tissue igual a "tumor"
+DNAmAgeCalc_Tumor <- DNAmAgeCalcProject_19739_Results[DNAmAgeCalcProject_19739_Results$Tissue == "tumor", ]
+
+
+table(DNAmAgeCalc_Tumor$Tissue)#268
+#Levine
+DNAmAgeCalc_Tumor$AgeAccelStatus <- ifelse(
+  DNAmAgeCalc_Tumor$AgeAccelPheno > 0,
+  "Accelerated",
+  "Deaccelerated"
+)
+
+table(DNAmAgeCalc_Tumor$AgeAccelStatus)
+# Accelerated Deaccelerated 
+# 133           135
+
+###########################################################
+
+#Grim Age
+DNAmAgeCalc_Tumor$AgeAccelGrimStatus <- ifelse(
+  DNAmAgeCalc_Tumor$AgeAccelGrim > 0,
+  "Accelerated GrimAge",
+  "Deaccelerated GrimAge"
+)
+
+table(DNAmAgeCalc_Tumor$AgeAccelGrimStatus)
+# Accelerated GrimAge Deaccelerated GrimAge 
+# 145                   119 
+
+colnames(pd_tumor)
+colnames(DNAmAgeCalc_Tumor)
+
+DNAmAgeCalc_Tumor$SID
+pd_tumor$Sample_Name
+
+
+# Substituindo '.' por '-' na coluna SID
+DNAmAgeCalc_Tumor$SID <- gsub("\\.", "-", DNAmAgeCalc_Tumor$SID)
+
+
+
+# Junção das tabelas pelo nome da amostra
+survival_age_accel_tumor <- merge(
+  DNAmAgeCalc_Tumor,   # tabela com aceleração da idade
+  pd_tumor,            # tabela com dados de sobrevida
+  by.x = "SID",        # coluna na DNAmAgeCalc_Tumor
+  by.y = "Sample_Name",# coluna na pd_tumor
+  all = FALSE          # FALSE = apenas amostras que existem nas duas tabelas
+)
+
+#checar quem tem informacao
+survival_age_accel_tumor$fu_survival_outcome
+
+
+# Remover linhas com fu_survival_outcome vazio
+survival_age_accel_tumor <- survival_age_accel_tumor[survival_age_accel_tumor$fu_survival_outcome != "", ]
+
+# Conferir se deu certo
+table(survival_age_accel_tumor$fu_survival_outcome) #249 amostras
+# Alive HN unknown    Alive with HN cancer Alive without HN cancer      Alive wo HN cancer     Deceased HN unknown 
+# 9                       8                       1                     119                      17 
+# Deceased with HN cancer   Deceased wo HN cancer 
+# 74                      21 
+
+
+
+# Criar a variável dicotômica para desfecho de sobrevida
+survival_age_accel_tumor$survival_event <- ifelse(grepl("Deceased", survival_age_accel_tumor$fu_survival_outcome), 1, 0)
+table(survival_age_accel_tumor$survival_event)
+# 0   1 
+# 137 112
+
+table(survival_age_accel_tumor$AgeAccelStatus)
+
+
+#criar objeto surv
+surv_object <- Surv(time = survival_age_accel_tumor$OS_days, 
+                    event = survival_age_accel_tumor$survival_event)
+
+#ajustar pelo status ln
+fit2 <- survfit(surv_object ~ AgeAccelGrimStatus, data = survival_age_accel_tumor)
+summary(fit2)$table
+#fit
+# records n.max n.start events    rmean se(rmean) median 0.95LCL 0.95UCL
+# AgeAccelStatus=Accelerated       125   125     125     58 2438.470  191.6377   2172    1940      NA
+# AgeAccelStatus=Deaccelerated     124   124     124     54 2555.972  219.1500   2555    1783      NA
+
+
+# summary(fit2)$table
+# records n.max n.start events    rmean se(rmean) median 0.95LCL 0.95UCL
+# AgeAccelGrimStatus=Accelerated GrimAge       137   137     137     63 2419.329  191.9529   2172    1783      NA
+# AgeAccelGrimStatus=Deaccelerated GrimAge     112   112     112     49 2528.559  217.3580   2172    1815      NA
+
+ggsurvplot(fit2,
+           data = survival_age_accel_tumor,
+           pval = TRUE,          # Adicionar valor p do teste log-rank
+           conf.int = TRUE,      # Mostrar intervalos de confiança
+           risk.table = TRUE,    # Mostrar tabela de risco 
+           title = "Survival curve by Age Acceleration (Grim Age's clock)",
+           surv.median.line = "hv",
+           xlim = c(0, 1825),
+           break.time.by= 250,
+           legend.labs = c("Deaccelerated", "Accelerated"),
+           palette = c("#2E9FDF", "#E7B800"))
+
+
+
+
+surv_diff <- survdiff(Surv(OS_days, survival_event) ~ AgeAccelGrimStatus, data = survival_age_accel_tumor)
+surv_diff
+# Call:
+#   survdiff(formula = Surv(OS_days, survival_event) ~ AgeAccelStatus, 
+#            data = survival_age_accel_tumor)
+# 
+# N Observed Expected (O-E)^2/E (O-E)^2/V
+# AgeAccelStatus=Accelerated   125       58     57.9  0.000272  0.000573
+# AgeAccelStatus=Deaccelerated 124       54     54.1  0.000291  0.000573
+# 
+# Chisq= 0  on 1 degrees of freedom, p= 1 
+
+# Call:
+#   survdiff(formula = Surv(OS_days, survival_event) ~ AgeAccelGrimStatus, 
+#            data = survival_age_accel_tumor)
+# 
+# N Observed Expected (O-E)^2/E (O-E)^2/V
+# AgeAccelGrimStatus=Accelerated GrimAge   137       63     61.8    0.0218    0.0491
+# AgeAccelGrimStatus=Deaccelerated GrimAge 112       49     50.2    0.0269    0.0491
+# 
+# Chisq= 0  on 1 degrees of freedom, p= 0.8 
+
+
+d <- data.frame(time = fit2$time,
+                n.risk = fit2$n.risk,
+                n.event = fit2$n.event,
+                n.censor = fit2$n.censor,
+                surv = fit2$surv,
+                upper = fit2$upper,
+                lower = fit2$lower
+)
+head(d)
+getwd()
+write.csv(d, "./Results/survfit_ageaccelerationGrimAge_values.csv")
+
+
+#####################################################################################################
+
+## Fevereiro de 2026
+## Explorando os dados associados ao acometimento lnfonodal
+
+
+library(tidyverse)
+library(limma)
+library(glmnet)
+library(pROC)
+library(survival)
+library(survminer)
+library(missMethyl)   # para enriquecimento GO/KEGG 
+library(limma)
+library(ggplot2)
+
+head(myCombat_nodal, 3)
+summary(pd_nodal)
+
+# LN+ vs N0 nao mostrou sinal forte no nível de DMP com FDR<0.05, o q sugere:
+# efeito biológico sutil
+# heterogeneidade tumoral alta
+# possível necessidade de modelagem multivariada
+# sinal esteja no nível regional/funcional/integrativo e no cpg isolado
+
+
+## Rodar M-values (melhor comportamento estatístico)
+#(Du et al., BMC Bioinformatics 2010)
+betaNodal <- myCombat_nodal
+M_Nodal <- log2(betaNodal/(1-betaNodal))
+
+#################################################################################################
+library(glmnet)
+##Existe um subconjunto pequeno de cpgs 
+##cuja metilação consegue prever LN+ melhor do que o acaso?
+
+##-------Em todas as sondas
+
+# resposta binária (0 = N0, 1 = others (as N+))
+y <- ifelse(pd_nodal$LN_group == "others", 1, 0)
+
+# preditores: amostras x CpGs
+X <- t(M_Nodal)  # rows = amostras; cols = variaveis
+
+
+#modelo de regressão logística com regularização LASSO,
+#usando cross validation, para prever um desfecho binário
+set.seed(123)
+cvfit <- cv.glmnet(
+  X, y,
+  family = "binomial", #modelo de regressao logistica
+  alpha = 1,       # 1 = lasso
+  nfolds = 10,      # dividindo o dado em 10 partes; treino em 9 e testo em 1
+  type.measure = "auc"
+)
+
+#em lasso os coeficientes viram zero; modelo seleciona automaticamente as variaveis
+#bom quando tenho mto mais variaveis q amostras
+plot(cvfit)
+max(cvfit$cvm)##0.66
+#O modelo consegue ordenar LN+ acima de N0 ~66% das vezes.
+
+# lambda 1se (mais parcimonioso) e lambda.min (mais preditivo)
+lambda_best  <- cvfit$lambda.1se ##mais conservador
+lambda_min   <- cvfit$lambda.min ##maior AUC media, maior risco de overfitting
+
+coef_best <- coef(cvfit, s = lambda_best)
+coef_min  <- coef(cvfit, s = lambda_min)
+
+# CpGs selecionados (excluindo intercepto)
+sel_cpgs_best <- rownames(coef_best)[which(coef_best != 0)]
+sel_cpgs_best <- setdiff(sel_cpgs_best, "(Intercept)")
+
+sel_cpgs_min <- rownames(coef_min)[which(coef_min != 0)]
+sel_cpgs_min <- setdiff(sel_cpgs_min, "(Intercept)")
+length(sel_cpgs_best) ##71
+length(sel_cpgs_min) #144
+
+##COMO TESTAR? Precisaria realizar essa predição em outro conjunto de dados!
+pred_prob <- predict(cvfit, newx = myNorm_tcga, s = lambda_min, type = "response")
+
+#pra cada paciente
+roc_obj <- roc(response = y, predictor = as.numeric(pred_prob))
+plot(roc_obj, print.auc = TRUE, col = "red", main = "ROC - LASSO N+ vs N0")
+
+
+####----------Nas DMPs
+
+# vetor de CpGs DMP
+cpg_dmp <- rownames(DMPs_nodalstatus_flexible)
+
+# filtrar M_Nodal para só essas sondas
+M_Nodal_DMP <- M_val_Nodal[cpg_dmp, , drop = FALSE]
+
+# resposta binária (0 = N0, 1 = others (as N+))
+y <- ifelse(pd_nodal$LN_group == "others", 1, 0)
+
+# preditores: amostras x CpGs
+X.dmp <- t(M_Nodal_DMP)  # rows = amostras; cols = variaveis
+
+
+#modelo de regressão logística com regularização LASSO,
+#usando cross validation, para prever um desfecho binário
+
+cvfit_dmp <- cv.glmnet(
+  X.dmp, y,
+  family = "binomial", #modelo de regressao logistica
+  alpha = 1,       # 1 = lasso
+  nfolds = 5,      # 
+  type.measure = "auc"
+)
+#em lasso os coeficientes viram zero; modelo seleciona automaticamente as variaveis
+#bom quando tenho mto mais variaveis q amostras
+plot(cvfit_dmp)
+
+# lambda 1se (mais parcimonioso) e lambda.min (mais preditivo)
+lambda_bestdmp  <- cvfit_dmp$lambda.1se ##mais conservador
+lambda_mindmp   <- cvfit_dmp$lambda.min ##maior AUC media, maior risco de overfitting
+
+coef_bestdmp <- coef(cvfit_dmp, s = lambda_bestdmp)
+coef_mindmp  <- coef(cvfit_dmp, s = lambda_mindmp)
+
+# CpGs selecionados (excluindo intercepto)
+sel_cpgs_bestdmp <- rownames(coef_bestdmp)[which(coef_bestdmp != 0)]
+sel_cpgs_bestdmp <- setdiff(sel_cpgs_bestdmp, "(Intercept)")
+
+sel_cpgs_mindmp <- rownames(coef_mindmp)[which(coef_mindmp != 0)]
+sel_cpgs_mindmp <- setdiff(sel_cpgs_mindmp, "(Intercept)")
+length(sel_cpgs_bestdmp) ##90
+length(sel_cpgs_mindmp) #125
+
+
+
+
+### 
+
+library(EpiDISH)
+data(centEpiFibIC.m)
+data(centBloodSub.m)
+
+##estimate immune cell-type fractions in a solid tissue
+
+frac.m <- hepidish(beta.m = betaNodal, 
+                   ref1.m = centEpiFibIC.m, 
+                   ref2.m = centBloodSub.m[,c(1, 2, 5)], 
+                   h.CT.idx = 3, 
+                   method = 'RPC')
+frac.m
+boxplot(frac.m)
+
+
+str(pd_nodal)
+
+
+
+############--------------------------------------------------------------------
+library(ConsensusClusterPlus) 
+library(survival)
+library(survminer)
+library(dplyr)
+
+
+## Pegar a matriz de DMPs entre N+ e N0 (pode ser a de valores M ou beta)
+
+# filtrar M_Nodal para só essas sondas
+betam_nodalDMP <- myCombat_nodal[cpg_dmp, , drop = FALSE]
+
+## rodar ConsensusClusterPlus
+set.seed(123)
+results_cons <- ConsensusClusterPlus(
+  d = betam_nodalDMP,
+  maxK = 6,           # testar 2 a 6 clusters
+  reps = 1000,        # nº de reamostragens
+  pItem = 0.8,        # fração de amostras por rodada
+  pFeature = 0.8,     # fração de CpGs por rodada
+  clusterAlg = "hc",  # ou "km"; aqui hierárquico
+  distance = "pearson",
+  innerLinkage = "ward.D2",
+  finalLinkage = "ward.D2",
+  plot = "pdf",
+  title = "ConsensusCluster_nodal",
+  writeTable = T
+)
+
+## Escolher K (visual)
+## Olhe os PDFs gerados (CDF, delta area, heatmap de consenso) 
+#na pasta "ConsensusCluster_nodal".
+k_opt <- 4
+cluster_assign <- results_cons[[k_opt]]$consensusClass
+table(cluster_assign)
+# cluster_assign com k=5
+# 1  2  3  4  5 
+# 39 57 68 33 58  
+
+# cluster_assign com k=4
+# 1  2  3  4 
+# 39 59 98 59
+
+## adicionar subtipo ao fenótipo
+pheno <- pd_nodal
+pheno$MethCluster <- factor(cluster_assign[match(pheno$Sample_Name, names(cluster_assign))])
+table(pheno$MethCluster, pheno$LN_group)
+#   N0 others com k=5
+# 1 15     24
+# 2 48      9
+# 3 53     15
+# 4 25      8
+# 5 41     17
+
+
+# N0 others com k=4
+# 1 15     24
+# 2 50      9
+# 3 75     23
+# 4 42     17
+
+## testar associação com N0/N1 (LN_group)
+## Se LN_group for fator N0/others:
+pheno$LN_group <- factor(pheno$LN_group, levels = c("N0", "others"))
+
+chisq.test(table(pheno$MethCluster, pheno$LN_group))
+# X-squared = 27.116, df = 3, p-value = 5.567e-06 com k=4
+
+
+## preparar variáveis de sobrevida
+## Criar  status binário: 1 = óbito por qualquer causa (ou HN), 0 = vivo
+pheno$OS_status <- ifelse(
+  pheno$fu_survival_outcome == "",NA,
+  ifelse(
+    grepl("^Deceased", pheno$fu_survival_outcome, ignore.case = TRUE),1,0)
+)
+
+## OS
+surv_obj_OS <- Surv(time = pheno$OS_days, event = pheno$OS_status)
+
+## Kaplan–Meier por cluster
+fit_OS <- survfit(surv_obj_OS ~ MethCluster, data = pheno)
+
+ggsurvplot(
+  fit_OS,
+  data = pheno,
+  risk.table = TRUE,
+  pval = TRUE,
+  conf.int = FALSE,
+  legend.title = "Methylation cluster",
+  legend.labs = levels(pheno$MethCluster),
+  xlab = "Days",
+  ylab = "OS"
+)
+
+## Cox ajustado (ex.: idade, LN_group, estágio)
+pheno$diag_stage_group <- factor(pheno$diag_stage_group)
+pheno$sex <- factor(pheno$sex)
+pheno$cig_status <- factor(pheno$cig_status)
+levels(pheno$MethCluster) <- paste0("C", levels(pheno$MethCluster))
+levels(pheno$MethCluster) #"C1" "C2" "C3" "C4"
+
+#checar associação com prognostico 
+cox_OS <- coxph(
+  surv_obj_OS ~ MethCluster + LN_group + sex + cig_status + diag_stage_group,
+  data = pheno
+)
+summary(cox_OS)
+
+
+
+
+
+## PCA para visualização dos subtipos
+betam_nodalDMP_t <- t(betam_nodalDMP)  # amostras em linhas
+pca_res <- prcomp(betam_nodalDMP_t, scale. = TRUE)
+
+pca_df <- data.frame(
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2],
+  MethCluster = pheno$MethCluster[match(rownames(betam_nodalDMP_t), pheno$Sample_Name)],
+  LN_group = pheno$LN_group[match(rownames(betam_nodalDMP_t), pheno$Sample_Name)]
+)
+
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = MethCluster, shape = LN_group)) +
+  geom_point(size = 3) +
+  theme_bw() +
+  labs(title = "PCA", x = "PC1", y = "PC2")
+
+##########################################
+
+
+## Prediction Analysis of Microarrays for R (pamr) 
+
+setwd()
+
+##Call packages
+library(ChAMP)
+library(minfi)
+library(limma)
+library(ggplot2)
+library(RColorBrewer)
+library(edgeR)
+library(survival)
+library(survminer)
+library(ggplot2)
+library(pamr)
+
+
+
+###_____________________PAM - ANÁLISE COM DADOS DE INVASÃO LINFONODAL _____________________________
+
+
+pamr_data <- list(x=betaNodal,
+                  y=factor(pd_nodal$LN_group), 
+                  geneid=rownames(betaNodal),
+                  genenames=paste("cg",as.character(1:nrow(betaNodal)),sep=""))
+
+
+# Realizar a call com a função pamr.train()
+train <- pamr.train(data = pamr_data)
+train
+
+
+## Cross-validate the classifier
+results <- pamr.cv(train, pamr_data) 
+results
+
+## Plot the cross-validated error curves
+pamr.plotcv(results)
+
+results$error
+# [1] 0.3882353 0.3882353 0.3764706 0.3843137 0.3960784 0.3960784 0.3882353 0.3764706 0.3764706 0.3764706
+# [11] 0.3803922 0.3725490 0.3686275 0.3764706 0.3843137 0.3843137 0.3921569 0.3921569 0.3803922 0.3803922
+# [21] 0.3529412 0.3490196 0.3176471 0.2941176 0.2823529 0.2862745 0.2862745 0.2862745 0.2862745 0.2862745
+results$threshold
+# [1] 0.0000000 0.1401129 0.2802259 0.4203388 0.5604517 0.7005647 0.8406776 0.9807906 1.1209035 1.2610164
+# [11] 1.4011294 1.5412423 1.6813552 1.8214682 1.9615811 2.1016941 2.2418070 2.3819199 2.5220329 2.6621458
+# [21] 2.8022587 2.9423717 3.0824846 3.2225976 3.3627105 3.5028234 3.6429364 3.7830493 3.9231622 4.0632752
+
+
+## Compute the confusion matrix for a particular model--> escolhi 3.36, que dá o erro de 0.28
+# ou seja, estarei errando em 28% e uma acurácia de ~72%
+pamr.confusion(results, threshold=3.36)
+#         N0   others   Class Error rate
+# N0     181      1      0.005494505
+# others  71      2      0.972602740
+# Overall error rate= 0.281
+
+table(pd_nodal$LN_group)
+
+
+
+## Plot the cross-validated class probabilities by class
+pamr.plotcvprob(results, pamr_data, threshold=2.1)
+
+
+## Plot the class centroids
+pamr.plotcen(train, pamr_data, threshold=2.1)
+
+## Make a gene plot of the most significant genes
+pamr.geneplot(train, pamr_data, threshold= 2.1)
+##Muitos genes, não vai dar pra plotar
+
+
+# Estimate false discovery rates and plot them
+fdr.obj<- pamr.fdr(train, pamr_data)
+str(fdr.obj)
+pamr.plotfdr(fdr.obj)#NULL
+
+##Gerar um gráfico
+plot(fdr.obj$results[, "Threshold"], fdr.obj$results[, "Median FDR"], type = "l", 
+     xlab = "Threshold", ylab = "Median FDR", main = "False Discovery Rates")
+
+
+## List the significant genes
+pamrlist_nodal <- pamr.listgenes(train, pamr_data, threshold=2.1)
+
+write.csv(pamrlist_nodal, "pamr.list_sondas_genes.csv")
+
+
+#########################################################
+#Análise PCA apenas do grupo com info de tabagismo
+
+pd_cigar_all <- pd_tumor %>%
+  filter(cig_status != "") #224
+
+# Filtrar matriz beta de novo
+myCombat_cigar <- myCombat_tumor[, pd_cigar_all$Sample_Name]
+
+# Coeck
+table(pd_cigar_all$cig_status)
+# Current    Ever  Former   Never 
+# 119       6      79      20
+
+
+#PCA tabagismo
+
+pca_cig <- prcomp(t(myCombat_cigar))
+
+
+fviz_pca_ind(
+  pca_cig,
+  geom.ind = "point",
+  col.ind = pd_cigar_all$cig_status, # cor por grupo
+  palette = "jco",
+  addEllipses = TRUE, 
+  legend.title = "Tobacco Status"
+)
+
+
+#Não é boas práticas usar o trace(), então estarei usando o dmrcate direto
+
+library(DMRcate)
+library(minfi)
+
+# transformar em M-values
+myMs <- logit2(myCombat_nodal)
+
+# matriz 
+design <- model.matrix(~ pd_nodal$LN_group)
+
+# 3. annotation (FORÇADO corretamente)
+myannotation <- cpg.annotate(
+  datatype = "array",
+  object = myMs,
+  what = "M",
+  analysis.type = "differential",
+  design = design,
+  coef = 2,
+  arraytype = "EPICv1"   # <- isso funciona aqui
+)
+
+##12226
+
+# DMR
+dmrcoutput <- dmrcate(myannotation, lambda=1000, C=2)
+
+# ranges
+results <- extractRanges(dmrcoutput, genome = "hg19")
+
+
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(GenomicRanges)
+
+anno <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+colnames(anno)
+
+anno_gr <- makeGRangesFromDataFrame(
+  anno,
+  seqnames.field = "chr",
+  start.field = "pos",
+  end.field = "pos",
+  strand.field = "strand",
+  keep.extra.columns = TRUE
+)
+
+seqlevelsStyle(anno_gr) <- "UCSC"  # garante "chr1", "chr2", etc
+
+#Enriquecimento
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(ReactomePA)
+
+### 1. Obter lista de genes a partir das tabelas de DMP e DMR -----------------
+overlaps <- findOverlaps(results, anno_gr)
+length(overlaps)##13005
+
+dmr_cpgs <- split(subjectHits(overlaps), queryHits(overlaps)) #2342
+
+genes_list <- lapply(dmr_cpgs, function(idx) {
+  genes <- anno$GencodeBasicV12_NAME[idx]
+  genes <- unlist(strsplit(genes, ";"))
+  genes <- trimws(genes)
+  genes[genes != ""]
+})
+
+
+genes_DMR <- unique(unlist(genes_list))
+length(genes_DMR)
+
+background_genes <- anno$GencodeBasicV12_NAME
+background_genes <- unlist(strsplit(background_genes, ";"))
+background_genes <- trimws(background_genes)
+background_genes <- background_genes[background_genes != ""]
+background_genes <- unique(background_genes)
+
+
+### Conversão de símbolos de genes para ENTREZ IDs -------------------------
+genes_DMR_entrez <- bitr(genes_DMR,
+                         fromType = "SYMBOL",
+                         toType = "ENTREZID",
+                         OrgDb = org.Hs.eg.db)
+#29.58% of input gene IDs are fail to map...
+
+background_entrez <- bitr(background_genes,
+                          fromType = "SYMBOL",
+                          toType = "ENTREZID",
+                          OrgDb = org.Hs.eg.db)
+# 43.33% of input gene IDs are fail to map...
+ 
+## Repetir para DMR genes
+ego_DMR <- enrichGO(
+  gene = genes_DMR_entrez$ENTREZID,
+  universe = background_entrez$ENTREZID,
+  OrgDb = org.Hs.eg.db,
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+library(missMethyl)
+sig_cpgs <- unique(anno$Name[unlist(dmr_cpgs)])
+all_cpgs <- rownames(anno)
+
+gometh_res <- gometh(
+  sig.cpg = sig_cpgs,
+  all.cpg = all_cpgs,
+  collection = "GO"
+)
+
+
+
+
+ekegg_DMR <- enrichKEGG(
+  gene = genes_DMR_entrez$ENTREZID,
+  organism = "hsa",
+  universe = background_entrez$ENTREZID,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.05
+)
+
+
+ereactome_DMR <- enrichPathway(
+  gene = genes_DMR_entrez$ENTREZID,
+  organism = "human",
+  universe = background_entrez$ENTREZID,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+
+library(enrichplot)
+dotplot(ego_DMR, showCategory = 15, title = "GO Enrichment")
+
+dotplot(ekegg_DMR, showCategory = 15, title = "KEGG Enrichment")
+
+dotplot(ereactome_DMR, showCategory = 15, title = "Reactome Enrichment")
+
+
+cnetplot(ekegg_DMR, showCategory = 5)
+
+cnetplot(ereactome_DMR, showCategory = 5)
