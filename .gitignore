@@ -1,0 +1,10 @@
+.Rhistory
+.RData
+.Rproj.user/
+*_cache/
+*_files/
+*.rds
+*.idat
+*.idat.gz
+.DS_Store
+Thumbs.db
