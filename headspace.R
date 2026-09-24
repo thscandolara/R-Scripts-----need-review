@@ -44,7 +44,7 @@ library(viridis)
 # ==============================================================================
 
 # --- Diretórios ---
-DIR_DATA    <- "/data04/projects04/SheilaCoelho/headspace_methyl/data/DADOS_GERADOS_AGOSTO2025_em_uso"
+DIR_DATA    <- "DADOS_GERADOS_AGOSTO2025_em_uso"
 DIR_RESULTS <- file.path(DIR_DATA, "LN_Results")
 
 # Criar pasta de resultados se não existir

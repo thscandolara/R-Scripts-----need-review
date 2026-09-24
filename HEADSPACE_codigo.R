@@ -5,10 +5,10 @@ library(tidyverse)
 library(viridis)
 
 
-setwd('/data04/projects04/SheilaCoelho/headspace_methyl/data/Larynx_Aug2025')
+setwd('Larynx_Aug2025')
 # Load
 
-dir <- '/data04/projects04/SheilaCoelho/headspace_methyl/data/DADOS_GERADOS_AGOSTO2025_em_uso'
+dir <- 'DADOS_GERADOS_AGOSTO2025_em_uso'
 setwd(dir)
 load("myLoadmyNormLarynx_aug2025.RData")
 load("myCombat.RData")
